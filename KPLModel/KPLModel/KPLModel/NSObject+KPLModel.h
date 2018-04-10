@@ -323,6 +323,92 @@ NS_ASSUME_NONNULL_BEGIN
  */
 + (nullable NSDictionary<NSString *, id> *)modelContainerPropertyGenericClass;
 
+
+/**
+ If need to create instances of different classes during json->object transform,
+ use the method to choose custom class based on dictionary data.
+ 
+ @discussion If the model implements this method, it will be called to determine resulting class during '+modelWithJSON:'. '_modelWIthDictionary:', converting object of properties of parent objects  (both singular and containers via '+midelContainerPropertyGenericClass').
+ 
+ Example:
+ @code
+        @class KPLCircle, KPLRectangle, KPLLine;
+        
+        @implementation KPLShape
+ 
+        + (Class)modelCustomClassForDictionary:(NSDictionary *)dictionary  {
+            if (dictionary[@"radius"] != nil) {
+                return [KPLCircle class];
+            } else if (dictionary[@"width"] != nil) {
+                return [KPLRectangle class];
+            } else if (dictionary[@"y2"] != nil) {
+                return [KPLLine class];
+            } else {
+                return [self class];
+            }
+        }
+        @end
+ @endcode
+ 
+ @param dictionary The json/kv dictionary.
+ 
+ @return Class to create from this dictionary, 'nil' to use current class.
+ 
+ */
++ (nullable Class)modelCustomClassForDictionary:(NSDictionary *)dictionary;
+
+/**
+ All the properties in blacklist will be ignored in model transform process.
+ Returns nil to ignore this feature.
+ 
+ @return An array of property's name.
+ */
++ (nullable NSArray<NSString *> *)modelPropertyBlacklist;
+
+/**
+ If a property is not in the whitelist, it will be ignored in model transform process.
+ Retruns nil to ignore this feature.
+ 
+ @return An array of proeprty's name.
+ */
++ (nullable NSArray <NSString *> *)modelPropertyWhitelist;
+
+/**
+ This method's behavior is similar to '-(BOOL)modelCustomTransformFromDictionary:(NSDictionary *)dic;', but be called before the model transform.
+ 
+ @discussion If the model implements this method, it will be called before '+modelWithJSON:', '+modelWithDictionary:', '-modelSetWithJSON:' and 'modelSetWithDictioanry:'
+ If this method returns nil, the transform process will ignore this model.
+ 
+ @param dic The json/kv dictionary.
+ 
+ @return Returns the modified dictionary, or nil to ignore this model.
+ */
+- (NSDictionary *)modelCustomWillTransformFromDictionary:(NSDictionary *)dic;
+
+/**
+ If the default json-to-model transform does not fit to your model object, implement this method to do additional process. You can also use this method to validate the model's properties.
+ 
+ @discussion If the model implements this method, it will be called at the end of '+modelWithJSON:', '+modelWithDictionary:', '-modelSetWithJSON:' and 'modelSetWithDictionary:'.
+ If this method returns NO, the transform process will ignore this model.
+ 
+ @param dic  The json/kv dictionary.
+ 
+ @return Returns YES if the model is valid, or NO to ignore this model.
+ */
+- (BOOL)modelCUstomTransformFromDictionary:(NSDictionary *)dic;
+
+/**
+ If the default model-to-json transform does not fit to your model class, implement this method to do additional process. You can also use this method to validate the json dictionary.
+ 
+ @discussion If the model implements this method, it will be called at the end of '-modelToJSONObject' and '-modelToJSONString'.
+ If this method returns NO, the transform process will ignore this json dictioanry.
+ 
+ @param dic The json dictioanry.
+ 
+ @return Returns YES if the model is valid, or NO to ignore this model.
+ */
+- (BOOL)modelCUstomTransformToDictionary:(NSMutableDictionary *)dic;
+
 @end
 
 NS_ASSUME_NONNULL_END

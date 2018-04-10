@@ -8,7 +8,7 @@
 
 #import "NSObject+KPLModel.h"
 #import "KPLClassInfo.h"
-
+#import <objc/message.h>
 
 #define force_inline __inline__ __attribute__((always_inline))
 
@@ -31,6 +31,52 @@ typedef NS_ENUM(NSUInteger, KPLEncodingNSType) {
     KPLEncodingTypeNSSet,
     KPLEncodingTypeNSMutableSet,
 };
+
+
+/// Get the Foundation class type from property info.
+static force_inline KPLEncodingNSType KPLClassGetNSType(Class cls) {
+    if (!cls) return KPLEncodingTypeNSUnkonwn;
+    
+    if ([cls isSubclassOfClass:[NSMutableString class]]) return KPLEncodingTypeNSMutableString;
+    if ([cls isSubclassOfClass:[NSString class]]) return KPLEncodingTypeNSString;
+    if ([cls isSubclassOfClass:[NSDecimalNumber class]]) return KPLEncodingTypeNSDecimalNumber;
+    if ([cls isSubclassOfClass:[NSNumber class]]) return KPLEncodingTypeNSNumber;
+    if ([cls isSubclassOfClass:[NSValue class]]) return KPLEncodingTypeNSValue;
+    if ([cls isSubclassOfClass:[NSMutableData class]]) return KPLEncodingTypeNSMutableData;
+    if ([cls isSubclassOfClass:[NSData class]]) return KPLEncodingTypeNSData;
+    if ([cls isSubclassOfClass:[NSDate class]]) return KPLEncodingTypeNSDate;
+    if ([cls isSubclassOfClass:[NSURL class]]) return KPLEncodingTypeNSURL;
+    if ([cls isSubclassOfClass:[NSMutableArray class]]) return KPLEncodingTypeNSMutableArray;
+    if ([cls isSubclassOfClass:[NSArray class]]) return KPLEncodingTypeNSArray;
+    if ([cls isSubclassOfClass:[NSMutableDictionary class]]) return KPLEncodingTypeNSMutableDictionary;
+    if ([cls isSubclassOfClass:[NSDictionary class]]) return KPLEncodingTypeNSDictionary;
+    if ([cls isSubclassOfClass:[NSMutableSet class]]) return KPLEncodingTypeNSMutableSet;
+    if ([cls isSubclassOfClass:[NSSet class]]) return KPLEncodingTypeNSSet;
+    
+    return KPLEncodingTypeNSUnkonwn;
+}
+
+/// Whether the type is c number.
+static force_inline BOOL KPLEncodingTypeIsCNumber(KPLEncodingType type) {
+    switch (type & KPLEncodingTypeMask) {
+        case KPLEncodingTypeBool:
+        case KPLEncodingTypeInt8:
+        case KPLEncodingTypeUInt8:
+        case KPLEncodingTypeInt16:
+        case KPLEncodingTypeUInt16:
+        case KPLEncodingTypeInt32:
+        case KPLEncodingTypeUInt32:
+        case KPLEncodingTypeInt64:
+        case KPLEncodingTypeUInt64:
+        case KPLEncodingTypeFloat:
+        case KPLEncodingTypeDouble:
+        case KPLEncodingTypeLongDouble:
+        return YES;
+        default: return NO;
+    }
+    
+    return NO;
+}
 
 @implementation NSObject (KPLModel)
 
@@ -93,10 +139,10 @@ typedef NS_ENUM(NSUInteger, KPLEncodingNSType) {
 
 @implementation _KPLModelMeta
 
-- (instancetype)initWithClass:(Class)cls {
-    KPLClassInfo *classInfo = [KPLClassInfo classInfoWIthClass:cls];
-    
-}
+//- (instancetype)initWithClass:(Class)cls {
+//    KPLClassInfo *classInfo = [KPLClassInfo classInfoWIthClass:cls];
+//    
+//}
 
 
 @end
