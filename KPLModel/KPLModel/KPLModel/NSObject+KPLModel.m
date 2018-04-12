@@ -534,10 +534,252 @@ static force_inline id KPLValueForMultiKeys(__unsafe_unretained NSDictionary *di
             genericMapper = tmp;
         }
     }
+    
+    // Create all property metas.
+    NSMutableDictionary *allPropertyMetas = [NSMutableDictionary new];
+    KPLClassInfo *curClassInfo = classInfo;
+    while (curClassInfo && curClassInfo.superCls != nil) { // recursive parse super class, but ignore root class (NSObject/NSProxy)
+        for (KPLClassPropertyInfo *propertyInfo in curClassInfo.propertyInfos.allValues) {
+            if (!propertyInfo.name) continue;
+            if (blacklist && [blacklist containsObject:propertyInfo.name]) continue;
+            if (whitelist && ![whitelist containsObject:propertyInfo.name]) continue;
+            _KPLModelPropertyMeta *meta = [_KPLModelPropertyMeta metaWithClassInfo:classInfo propertyInfo:propertyInfo generic:genericMapper[propertyInfo.name]];
+            if (!meta || !meta->_name) continue;
+            if (!meta->_getter || !meta->_setter) continue;
+            if (allPropertyMetas[meta->_name]) continue;
+            allPropertyMetas[meta->_name] = meta;
+        }
+        curClassInfo = curClassInfo.superClassInfo;
+    }
+    if (allPropertyMetas.count) _allPropertyMetas = allPropertyMetas.allValues.copy;
+    
+    // create mapper
+    NSMutableDictionary *mapper = [NSMutableDictionary new];
+    NSMutableArray *keyPathPropertyMetas = [NSMutableArray new];
+    NSMutableArray *multiKeysPropertyMetas = [NSMutableArray new];
+    
+    if ([cls respondsToSelector:@selector(modelCustomPropertyMapper)]) {
+        NSDictionary *customMapper = [(id <KPLModel>)cls modelCustomPropertyMapper];
+        [customMapper enumerateKeysAndObjectsUsingBlock:^(NSString *propertyName, NSString *mappedToKey, BOOL *stop) {
+            _KPLModelPropertyMeta *propertyMeta = allPropertyMetas[propertyName];
+            if (!propertyMeta) return;
+            [allPropertyMetas removeObjectForKey:propertyName];
+            
+            if ([mappedToKey isKindOfClass:[NSString class]]) {
+                if (mappedToKey.length == 0) return;
+                
+                propertyMeta->_mappedToKey = mappedToKey;
+                NSArray *keyPath = [mappedToKey componentsSeparatedByString:@"."];
+                for (NSString *onePath in keyPath) {
+                    if (onePath.length == 0) {
+                        NSMutableArray *tmp = keyPath.mutableCopy;
+                        [tmp removeObject:@""];
+                        keyPath = tmp;
+                        break;
+                    }
+                }
+                if (keyPath.count > 1) {
+                    propertyMeta->_mappedToKeyPath = keyPath;
+                    [keyPathPropertyMetas addObject:propertyMeta];
+                }
+                propertyMeta->_next = mapper[mappedToKey] ?: nil;
+                mapper[mappedToKey] = propertyMeta;
+            } else if ([mappedToKey isKindOfClass:[NSArray class]]) {
+                
+                NSMutableArray *mappedToKeyArray = [NSMutableArray array];
+                for (NSString *oneKey in ((NSArray *)mappedToKey)) {
+                    if (![oneKey isKindOfClass:[NSString class]]) continue;
+                    if (oneKey.length == 0) continue;
+                    
+                    NSArray *keyPath = [oneKey componentsSeparatedByString:@"."];
+                    if (keyPath.count > 1) {
+                        [mappedToKeyArray addObject:keyPath];
+                    } else {
+                        [mappedToKeyArray addObject:oneKey];
+                    }
+                    
+                    if (!propertyMeta->_mappedToKey) {
+                        propertyMeta->_mappedToKey = oneKey;
+                        propertyMeta->_mappedToKeyPath = keyPath.count > 1 ? keyPath : nil;
+                    }
+                }
+                if (!propertyMeta->_mappedToKey) return;
+                
+                propertyMeta->_mappedToKeyArray = mappedToKeyArray;
+                [multiKeysPropertyMetas addObject:propertyMeta];
+                
+                propertyMeta->_next = mapper[mappedToKey] ?: nil;
+                mapper[mappedToKey] = propertyMeta;
+                
+            }
+        }];
+    }
+    
+    [allPropertyMetas enumerateKeysAndObjectsUsingBlock:^(NSString *name, _KPLModelPropertyMeta *propertyMeta, BOOL *stop) {
+        propertyMeta->_mappedToKey = name;
+        propertyMeta->_next = mapper[name] ?: nil;
+        mapper[name] = propertyMeta;
+    }];
+    
+    if (mapper.count) _mapper = mapper;
+    if (keyPathPropertyMetas) _keyPathPropertyMetas = keyPathPropertyMetas;
+    if (multiKeysPropertyMetas) _multiKeysPropertyMetas = multiKeysPropertyMetas;
+    
+    _classInfo = classInfo;
+    _keyMappedCount = _allPropertyMetas.count;
+    _nsType = KPLClassGetNSType(cls);
+    _hasCustomWillTransformFromDictionary = ([cls instanceMethodForSelector:@selector(modelCustomWillTransformFromDictionary:)]);
+    _hasCustomTransformFromDictionary = ([cls instanceMethodForSelector:@selector(modelCustomTransformFromDictionary:)]);
+    _hasCustomTransformToDictionary = ([cls instanceMethodForSelector:@selector(modelCustomTransformToDictionary:)]);
+    _hasCustomClassFromDictionary = ([cls instanceMethodForSelector:@selector(modelCustomClassForDictionary:)]);
+    
+    return self;
 }
 
+/// Returns the cached model class meta
++ (instancetype)metaWithClass:(Class)cls {
+    if (!cls) return nil;
+    static CFMutableDictionaryRef cache;
+    static dispatch_once_t onceToken;
+    static dispatch_semaphore_t lock;
+    dispatch_once(&onceToken, ^{
+        cache = CFDictionaryCreateMutable(CFAllocatorGetDefault(), 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+        lock = dispatch_semaphore_create(1);
+    });
+    dispatch_semaphore_wait(lock, DISPATCH_TIME_FOREVER);
+    _KPLModelMeta *meta = CFDictionaryGetValue(cache, (__bridge const void *)cls);
+    dispatch_semaphore_signal(lock);
+    if (!meta || meta->_classInfo.needUpdate) {
+        meta = [[_KPLModelMeta alloc] initWithClass:cls];
+        if (meta) {
+            dispatch_semaphore_wait(lock, DISPATCH_TIME_FOREVER);
+            CFDictionaryGetValue(cache, (__bridge const void *)meta);
+            dispatch_semaphore_signal(lock);
+        }
+    }
+    return meta;
+}
 
 @end
+
+/**
+ Get number from property.
+ @discussion Caller should hold strong reference to the parameters before this function returns.
+ @param model Should not be nil.
+ @param meta Should not be nil, meta.isCNumber should be YES, meta.getter should not be nil.
+ @return A number object, or nil if failed.
+ */
+static force_inline NSNumber *ModelCreateNumberFromProperty(__unsafe_unretained id model, __unsafe_unretained _KPLModelPropertyMeta *meta) {
+    
+    switch (meta->_type & KPLEncodingTypeMask) {
+        case KPLEncodingTypeBool: {
+            return @(((bool (*)(id, SEL))(void *) objc_msgSend)((id)model, meta->_getter));
+        }
+        case KPLEncodingTypeInt8: {
+            return @(((int8_t (*)(id, SEL))(void *) objc_msgSend)((id)model, meta->_getter));
+        }
+        case KPLEncodingTypeUInt8: {
+            return @(((UInt8 (*)(id, SEL))(void *) objc_msgSend)((id)model, meta->_getter));
+        }
+        case KPLEncodingTypeInt16: {
+            return @(((int16_t (*)(id, SEL))(void *)objc_msgSend)((id)model, meta->_getter));
+        }
+        case KPLEncodingTypeUInt16: {
+            return @(((UInt16 (*)(id, SEL)) objc_msgSend)((id)model, meta->_getter));
+        }
+        case KPLEncodingTypeInt32: {
+            return @(((int32_t (*)(id, SEL))(void *) objc_msgSend)((id)model, meta->_getter));
+        }
+        case KPLEncodingTypeUInt32: {
+            return @(((int32_t (*)(id, SEL))(void *) objc_msgSend)((id)model, meta->_getter));
+        }
+        case KPLEncodingTypeInt64: {
+            return @(((int64_t (*)(id, SEL))(void *) objc_msgSend)((id)model, meta->_getter));
+        }
+        case KPLEncodingTypeUInt64: {
+            return @(((UInt64 (*)(id, SEL))(void *) objc_msgSend)((id)model, meta->_getter));
+        }
+        case KPLEncodingTypeFloat: {
+            float num = ((float (*)(id, SEL))(void *) objc_msgSend)((id)model, meta->_getter);
+            if (isnan(num) || isinf(num)) return nil;
+            return @(num);
+        }
+        case KPLEncodingTypeDouble: {
+            double num = ((double (*)(id, SEL))(void *) objc_msgSend)((id)model, meta->_getter);
+            if (isnan(num) || isinf(num)) return nil;
+            return @(num);
+        }
+        case KPLEncodingTypeLongDouble: {
+            double num = ((double (*)(id, SEL))(void *) objc_msgSend)((id)model, meta->_getter);
+            if (isnan(num) || isinf(num)) return nil;
+            return @(num);
+        }
+        default: return nil;
+    }
+}
+
+/**
+ Get number to property.
+ @discussion Caller should hold strong reference to the parameters before this function returns.
+ */
+static force_inline void ModelSetNumberToProperty(__unsafe_unretained id model, __unsafe_unretained NSNumber *num, __unsafe_unretained _KPLModelPropertyMeta *meta) {
+    
+    switch (meta->_type & KPLEncodingTypeMask) {
+        case KPLEncodingTypeBool: {
+            ((void (*)(id, SEL, bool))(void *) objc_msgSend)((id)model, meta->_setter ,num.boolValue);
+        } break;
+        case KPLEncodingTypeInt8: {
+            ((void (*)(id, SEL, int8_t))(void *) objc_msgSend)((id)model, meta->_setter, (int8_t)num.charValue);
+        } break;
+        case KPLEncodingTypeUInt8: {
+            ((void (*)(id, SEL, UInt8))(void *) objc_msgSend)((id)model, meta->_setter, (UInt8)num.unsignedCharValue);
+        } break;
+        case KPLEncodingTypeInt16: {
+            ((void (*)(id, SEL, int16_t))(void *) objc_msgSend)((id)model, meta->_setter, (int16_t)num.shortValue);
+        } break;
+        case KPLEncodingTypeUInt16: {
+            ((void (*)(id, SEL, UInt16))(void *) objc_msgSend)((id)model, meta->_setter, (UInt16)num.unsignedShortValue);
+        } break;
+        case KPLEncodingTypeInt32: {
+            ((void (*)(id, SEL, int32_t))(void *) objc_msgSend)((id)model, meta->_setter, (int32_t)num.intValue);
+        } break;
+        case KPLEncodingTypeUInt32: {
+            ((void (*)(id, SEL, UInt32))(void *) objc_msgSend)((id)model, meta->_setter, (UInt32)num.unsignedIntValue);
+        } break;
+        case KPLEncodingTypeInt64: {
+            if ([num isKindOfClass:[NSDecimalNumber class]]) {
+                ((void (*)(id, SEL, int64_t))(void *) objc_msgSend)((id)model, meta->_setter, (int64_t)num.stringValue.longLongValue);
+            } else {
+                ((void (*)(id, SEL, int64_t))(void *) objc_msgSend)((id)model, meta->_setter, (int64_t)num.longLongValue);
+            }
+        } break;
+        case KPLEncodingTypeUInt64: {
+            if ([num isKindOfClass:[NSDecimalNumber class]]) {
+                ((void (*)(id, SEL, int64_t))(void *) objc_msgSend)((id)model, meta->_setter, (int64_t)num.stringValue.longLongValue);
+            } else {
+                ((void (*)(id, SEL, UInt64))(void *) objc_msgSend)((id)model, meta->_setter, (UInt64)num.unsignedLongLongValue);
+            }
+        } break;
+        case KPLEncodingTypeFloat: {
+            float f = num.floatValue;
+            if (isnan(f) || isinf(f)) f = 0;
+            ((void (*)(id, SEL, float))(void *)objc_msgSend)((id)model, meta->_setter, f);
+        } break;
+        case KPLEncodingTypeDouble: {
+            double d = num.doubleValue;
+            if (isnan(d) || isinf(d)) d = 0;
+            ((void (*)(id, SEL, double))(void *) objc_msgSend)((id)model, meta->_setter, d);
+        } break;
+        case KPLEncodingTypeLongDouble: {
+            long double d = num.longLongValue;
+            if (isnan(d) || isinf(d)) d = 0;
+            ((void (*)(id, SEL, long double))(void *) objc_msgSend)((id)model, meta->_setter, (long double)d);
+        } // break; commented for code coverage in next line 
+            
+        default: break;
+    }
+    
+}
 
 @implementation NSObject (KPLModel)
 

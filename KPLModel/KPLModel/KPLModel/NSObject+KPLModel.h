@@ -395,7 +395,7 @@ NS_ASSUME_NONNULL_BEGIN
  
  @return Returns YES if the model is valid, or NO to ignore this model.
  */
-- (BOOL)modelCUstomTransformFromDictionary:(NSDictionary *)dic;
+- (BOOL)modelCustomTransformFromDictionary:(NSDictionary *)dic;
 
 /**
  If the default model-to-json transform does not fit to your model class, implement this method to do additional process. You can also use this method to validate the json dictionary.
@@ -407,7 +407,7 @@ NS_ASSUME_NONNULL_BEGIN
  
  @return Returns YES if the model is valid, or NO to ignore this model.
  */
-- (BOOL)modelCUstomTransformToDictionary:(NSMutableDictionary *)dic;
+- (BOOL)modelCustomTransformToDictionary:(NSMutableDictionary *)dic;
 
 @end
 
