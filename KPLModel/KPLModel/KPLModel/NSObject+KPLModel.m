@@ -1201,19 +1201,231 @@ static id ModelToJSONNObjectRecursive(NSObject *model) {
         } else {
             switch (propertyMeta->_type & KPLEncodingTypeMask) {
                 case KPLEncodingTypeObject: {
-                    id v = ((Class (*)(id, SEL))(vod *) objc_msgSend)((id)model)
+                    id v = ((Class (*)(id, SEL))(void *) objc_msgSend)((id)model, propertyMeta->_getter);
+                    value = ModelToJSONNObjectRecursive(v);
+                    if (value == (id)kCFNull) value = nil;
+                } break;
+                
+                case KPLEncodingTypeClass: {
+                    Class v = ((Class (*)(id, SEL))(void *) objc_msgSend)((id)model, propertyMeta->_getter);
+                    value = v ? NSStringFromClass(v) : nil;
+                } break;
+                
+                case KPLEncodingTypeSEL: {
+                    SEL v = ((SEL (*)(id, SEL))(void *) objc_msgSend)((id)model, propertyMeta->_getter);
+                    value = v ? NSStringFromSelector(v) : nil;
                 } break;
                     
                 default:
                     break;
             }
         }
+        
+        if (!value) return;
+        
+        if (propertyMeta->_mappedToKeyPath) {
+            NSMutableDictionary *superDic = dic;
+            NSMutableDictionary *subDic = nil;
+            for (NSUInteger i = 0, max = propertyMeta->_mappedToKeyPath.count; i < max; i++) {
+                NSString *key = propertyMeta->_mappedToKeyPath[i];
+                if (i + 1 == max) { // end
+                    if (!superDic[key]) superDic[key] = value;
+                    break;
+                }
+                
+                subDic = superDic[key];
+                if (subDic) {
+                    if ([subDic isKindOfClass:[NSDictionary class]]) {
+                        subDic = subDic.mutableCopy;
+                        superDic[key] = subDic;
+                    } else {
+                        break;
+                    }
+                } else {
+                    subDic = [NSMutableDictionary new];
+                    superDic[key] = subDic;
+                }
+                superDic = subDic;
+                subDic = nil;
+            }
+        } else {
+            if (!dic[propertyMeta->_mappedToKey]) {
+                dic[propertyMeta->_mappedToKey] = value;
+            }
+        }
     }];
+    
+    if (modelMeta->_hasCustomTransformToDictionary) {
+        BOOL suc = [((id<KPLModel>)model) modelCustomTransformToDictionary:dic];
+        if (!suc) return nil;
+    }
+    return result;
 }
+
+/// Add indent to string (exclude first line)
+static NSMutableString *ModelDescriptionAddIndent(NSMutableString *desc, NSUInteger indent) {
+    for (NSUInteger i = 0, max = desc.length; i < max; i++) {
+        unichar c = [desc characterAtIndex:i];
+        if (c == '\n') {
+            for (NSUInteger j = 0; j < indent; j++) {
+                [desc insertString:@"    " atIndex:i + 1];
+            }
+            i += indent * 4;
+            max += indent * 4;
+        }
+    }
+    return desc;
+}
+
+/// Generate a description string
+static NSString *ModelDescription(NSObject *model) {
+    static const int kDescMaxLength = 100;
+    if (!model) return @"<nil>";
+    if (model == (id)kCFNull) return @"<null>";
+    if (![model isKindOfClass:[NSObject class]]) return [NSString stringWithFormat:@"%@", model];
+    
+    _KPLModelMeta *modelMeta = [_KPLModelMeta metaWithClass:model.class];
+    switch (modelMeta->_nsType) {
+        case KPLEncodingTypeNSString:
+        case KPLEncodingTypeNSMutableString: {
+            return [NSString stringWithFormat:@"\"%@\"", model];
+        }
+        
+        case KPLEncodingTypeNSValue:
+        case KPLEncodingTypeNSData:
+        case KPLEncodingTypeNSMutableData: {
+            NSString *tmp = model.description;
+            if (tmp.length > kDescMaxLength) {
+                tmp = [tmp substringToIndex:kDescMaxLength];
+                tmp = [tmp stringByAppendingString:@"..."];
+            }
+            return tmp;
+        }
+            
+        case KPLEncodingTypeNSNumber:
+        case KPLEncodingTypeNSDecimalNumber:
+        case KPLEncodingTypeNSDate:
+        case KPLEncodingTypeNSURL: {
+            return [NSString stringWithFormat:@"%@", model];
+        }
+            
+        case KPLEncodingTypeNSSet:
+        case KPLEncodingTypeNSMutableSet: {
+            model = ((NSSet *)model).allObjects;
+        } // no break
+            
+        case KPLEncodingTypeNSArray:
+        case KPLEncodingTypeNSMutableArray: {
+            NSArray *array = (id)model;
+            NSMutableString *desc = [NSMutableString new];
+            if (array.count == 0) {
+                return [desc stringByAppendingString:@"[]"];
+            } else {
+                [desc appendFormat:@"[\n"];
+                for (NSUInteger i = 0, max = array.count; i < max; i++) {
+                    NSObject *obj = array[i];
+                    [desc appendString:@"    "];
+                    [desc appendString:ModelDescriptionAddIndent(ModelDescription(obj).mutableCopy, 1)];
+                    [desc appendString:(i + 1 == max) ? @"\n" : @";\n"];
+                }
+                [desc appendString:@"]"];
+                return desc;
+            }
+        }
+            
+        case KPLEncodingTypeNSDictionary:
+        case KPLEncodingTypeNSMutableDictionary: {
+            NSDictionary *dic = (id)model;
+            NSMutableString *desc = [NSMutableString new];
+            if (dic.count == 0) {
+                return [desc stringByAppendingString:@"{}"];
+            } else {
+                NSArray *keys = dic.allKeys;
+                
+                [desc appendFormat:@"{\n"];
+                for (NSUInteger i = 0, max = keys.count; i < max; i++) {
+                    NSString *key = keys[i];
+                    NSObject *value = dic[key];
+                    [desc appendString:@"    "];
+                    [desc appendFormat:@"%@ = %@", key, ModelDescriptionAddIndent(ModelDescription(value).mutableCopy, 1)];
+                    [desc appendString:(i + 1 == max) ? @"\n" : @";\n"];
+                }
+                [desc appendString:@"}"];
+            }
+            return desc;
+        }
+        default: {
+            NSMutableString *desc = [NSMutableString new];
+            [desc appendFormat:@"<%@: %p>", model.class, model];
+            if (modelMeta->_allPropertyMetas.count == 0) return desc;
+            
+            // sort property names
+            NSArray *properties = [modelMeta->_allPropertyMetas sortedArrayUsingComparator:^NSComparisonResult(_KPLModelPropertyMeta *p1, _KPLModelPropertyMeta *p2) {
+                return [p1->_name compare:p2->_name];
+            }];
+            
+            [desc appendFormat:@" {\n"];
+            for (NSUInteger i = 0, max = properties.count; i < max; i++) {
+                _KPLModelPropertyMeta *property = properties[i];
+                NSString *propertyDesc;
+                if (property->_isCNumber) {
+                    NSNumber *num = ModelCreateNumberFromProperty(model, property);
+                    propertyDesc = num.stringValue;
+                } else {
+                    switch (property->_type & KPLEncodingTypeMask) {
+                        case KPLEncodingTypeObject: {
+                            id v = ((id (*)(id, SEL))(void *) objc_msgSend)((id)model, property->_getter);
+                            propertyDesc = ModelDescription(v);
+                            if (!propertyDesc) propertyDesc = @"<nil>";
+                        } break;
+                        
+                        case KPLEncodingTypeClass: {
+                            Class v = ((Class (*)(id, SEL))(void *) objc_msgSend)((id)model, property->_getter);
+                            propertyDesc = ((NSObject *)v).description;
+                            if (!propertyDesc) propertyDesc = @"<nil>";
+                        } break;
+                            
+                        case KPLEncodingTypeSEL: {
+                            SEL sel = ((SEL (*)(id, SEL))(void *) objc_msgSend)((id)model, property->_getter);
+                            if (sel) propertyDesc = NSStringFromSelector(sel);
+                            else propertyDesc = @"<NULL>";
+                        } break;
+                            
+                        case KPLEncodingTypeBlock: {
+                            id block = ((id (*)(id, SEL))(void *) objc_msgSend)((id)model, property->_getter);
+                            propertyDesc = block ? ((NSObject *)block).description : @"<nil>";
+                        } break;
+                            
+                        case KPLEncodingTypeCArray:
+                        case KPLEncodingTypeCString:
+                        case KPLEncodingTypePointer: {
+                            void *pointer = ((void *(*)(id, SEL))(void *) objc_msgSend)((id)model, property->_getter);
+                            propertyDesc = [NSString stringWithFormat:@"%p", pointer];
+                        } break;
+                            
+                        case KPLEncodingTypeStruct:
+                        case KPLEncodingTypeUnion: {
+                            NSValue *value = [model valueForKey:property->_name];
+                            propertyDesc = value ? value.description : @"{unknown}";
+                        } break;
+                            
+                        default: propertyDesc = @"<unknown>";
+                    }
+                }
+                propertyDesc = ModelDescriptionAddIndent(propertyDesc.mutableCopy, 1);
+                [desc appendFormat:@"    %@ = %@", property->_name, propertyDesc];
+                [desc appendString:(i + 1 == max) ? @"\n" : @";\n"];
+            }
+            [desc appendFormat:@"}"];
+            return desc;
+        }
+    }
+}
+
 
 @implementation NSObject (KPLModel)
 
-+ (NSDictionary *)kpl_dictonaryWithJSON:(id)json {
++ (NSDictionary *)_kpl_dictonaryWithJSON:(id)json {
     if (!json || json == (id)kCFNull) return nil;
     NSDictionary *dic = nil;
     NSData *jsonData = nil;
@@ -1232,7 +1444,7 @@ static id ModelToJSONNObjectRecursive(NSObject *model) {
 }
 
 + (instancetype)kpl_modelWithJSON:(id)json {
-    NSDictionary *dic = [self kpl_dictonaryWithJSON:json];
+    NSDictionary *dic = [self _kpl_dictonaryWithJSON:json];
     return [self kpl_modelWithDictionary:dic];
 }
 
@@ -1241,9 +1453,358 @@ static id ModelToJSONNObjectRecursive(NSObject *model) {
     if (![dictionary isKindOfClass:[NSDictionary class]]) return nil;
     
     Class cls = [self class];
+    _KPLModelMeta *modelMeta = [_KPLModelMeta metaWithClass:cls];
+    if (modelMeta->_hasCustomClassFromDictionary) {
+        cls = [cls modelCustomClassForDictionary:dictionary] ?: cls;
+    }
+    
+    NSObject *one = [cls new];
+    if ([one kpl_modelSetWithDictionary:dictionary]) return one;
     
     return nil;
+}
+
+- (BOOL)kpl_modelSetWithJSON:(id)json {
+    NSDictionary *dic = [NSObject _kpl_dictonaryWithJSON:json];
+    return [self kpl_modelSetWithDictionary:dic];
+}
+
+- (BOOL)kpl_modelSetWithDictionary:(NSDictionary *)dic {
+    if (!dic || dic == (id)kCFNull) return NO;
+    if (![dic isKindOfClass:[NSDictionary class]]) return NO;
     
+    _KPLModelMeta *modelMeta = [_KPLModelMeta metaWithClass:object_getClass(self)];
+    if (modelMeta->_keyMappedCount == 0) return NO;
+    
+    if (modelMeta->_hasCustomWillTransformFromDictionary) {
+        dic = [((id<KPLModel>)self) modelCustomWillTransformFromDictionary:dic];
+        if (![dic isKindOfClass:[NSDictionary class]]) return NO;
+    }
+    
+    ModelSetContext context = {0};
+    context.modelMeta = (__bridge void *)(modelMeta);
+    context.model = (__bridge void *)(self);
+    context.dictionary = (__bridge void *)(dic);
+    
+    if (modelMeta->_keyMappedCount >= CFDictionaryGetCount((CFDictionaryRef)dic)) {
+        CFDictionaryApplyFunction((CFDictionaryRef)dic, ModelSetWithDictionaryFunction, &context);
+        if (modelMeta->_keyPathPropertyMetas) {
+            CFArrayApplyFunction((CFArrayRef)modelMeta->_keyPathPropertyMetas, CFRangeMake(0, CFArrayGetCount((CFArrayRef)modelMeta->_keyPathPropertyMetas)), ModelSetWithPropertyMetaArrayFunction, &context);
+        }
+        if (modelMeta->_multiKeysPropertyMetas) {
+            CFArrayApplyFunction((CFArrayRef)modelMeta->_multiKeysPropertyMetas, CFRangeMake(0, CFArrayGetCount((CFArrayRef)modelMeta->_multiKeysPropertyMetas)), ModelSetWithPropertyMetaArrayFunction, &context);
+        }
+    } else {
+        CFArrayApplyFunction((CFArrayRef)modelMeta->_allPropertyMetas, CFRangeMake(0, modelMeta->_keyMappedCount), ModelSetWithPropertyMetaArrayFunction, &context);
+    }
+    
+    if (modelMeta->_hasCustomTransformFromDictionary) {
+        return [((id<KPLModel>)self) modelCustomTransformFromDictionary:dic];
+    }
+    return YES;
+}
+
+- (id)kpl_modelToJSONObject {
+    /**
+     Apple said:
+     The top level object is an NSArray or NSDictionary
+     All objects are instance of NSString, NSNumber, NSArray, NSDictionary, or NSNull.
+     All dictionary keys are instances of NSString.
+     Numbers are not NaN or infinity.
+     */
+    id jsonObject = ModelToJSONNObjectRecursive(self);
+    if ([jsonObject isKindOfClass:[NSArray class]]) return jsonObject;
+    if ([jsonObject isKindOfClass:[NSDictionary class]]) return jsonObject;
+    return nil;
+}
+
+- (NSData *)kpl_modelToJSONData {
+    id jsonObject = [self kpl_modelToJSONObject];
+    if (!jsonObject) return nil;
+    return [NSJSONSerialization dataWithJSONObject:jsonObject options:0 error:NULL];
+}
+
+- (NSString *)kpl_modelToJSONString {
+    NSData *jsonData = [self kpl_modelToJSONData];
+    if (!jsonData) return nil;
+    return [[NSString alloc] initWithData:jsonData encoding:NSUTF8StringEncoding];
+}
+
+- (id)kpl_modelCopy {
+    if (self == (id)kCFNull) return self;
+    _KPLModelMeta *modelMeta = [_KPLModelMeta metaWithClass:self.class];
+    if (modelMeta->_nsType) return [self copy];
+    
+    NSObject *one = [self.class new];
+    for (_KPLModelPropertyMeta *propertyMeta in modelMeta->_allPropertyMetas) {
+        if (!propertyMeta->_getter || !propertyMeta->_setter) continue;
+        
+        if (propertyMeta->_isCNumber) {
+            switch (propertyMeta->_type & KPLEncodingTypeMask) {
+                case KPLEncodingTypeBool: {
+                    bool num = ((bool (*)(id, SEL))(void *) objc_msgSend)((id)self, propertyMeta->_getter);
+                    ((void (*)(id, SEL, bool))(void *) objc_msgSend)((id)one, propertyMeta->_setter, num);
+                } break;
+                    
+                case KPLEncodingTypeInt8:
+                case KPLEncodingTypeUInt8: {
+                    uint8_t num = ((bool (*)(id, SEL))(void *) objc_msgSend)((id)self, propertyMeta->_getter);
+                    ((void (*)(id, SEL, bool))(void *) objc_msgSend)((id)self, propertyMeta->_setter, num);
+                } break;
+                    
+                case KPLEncodingTypeInt16:
+                case KPLEncodingTypeUInt16: {
+                    uint16_t num = ((bool (*)(id, SEL))(void *) objc_msgSend)((id)self, propertyMeta->_getter);
+                    ((void (*)(id, SEL, bool))(void *) objc_msgSend)((id)one, propertyMeta->_setter, num);
+                } break;
+                    
+                case KPLEncodingTypeInt32:
+                case KPLEncodingTypeUInt32: {
+                    uint32_t num = ((bool (*)(id, SEL))(void *) objc_msgSend)((id)self, propertyMeta->_getter);
+                    ((void (*)(id, SEL, bool))(void *) objc_msgSend)((id)one, propertyMeta->_setter, num);
+                } break;
+                    
+                case KPLEncodingTypeInt64:
+                case KPLEncodingTypeUInt64: {
+                    uint64_t num = ((bool (*)(id, SEL))(void *) objc_msgSend)((id)self, propertyMeta->_getter);
+                    ((void (*)(id, SEL, bool))(void *) objc_msgSend)((id)one, propertyMeta->_setter, num);
+                } break;
+                    
+                case KPLEncodingTypeFloat: {
+                    float num = ((float (*)(id, SEL))(void *) objc_msgSend)((id)self, propertyMeta->_getter);
+                    ((void (*)(id, SEL, float))(void *) objc_msgSend)((id)one, propertyMeta->_setter, num);
+                } break;
+                case KPLEncodingTypeDouble: {
+                    double num = ((double (*)(id, SEL))(void *) objc_msgSend)((id)self, propertyMeta->_getter);
+                    ((void (*)(id, SEL, float))(void *) objc_msgSend)((id)one, propertyMeta->_setter, num);
+                } break;
+                case KPLEncodingTypeLongDouble: {
+                    long double num = ((long double (*)(id, SEL))(void *) objc_msgSend)((id)self, propertyMeta->_getter);
+                    ((void (*)(id, SEL, long double))(void *) objc_msgSend)((id)one, propertyMeta->_setter, num);
+                } // break; command for code coverage in next line
+                default: break;
+            }
+        } else {
+            switch (propertyMeta->_type & KPLEncodingTypeMask) {
+                case KPLEncodingTypeObject:
+                case KPLEncodingTypeClass:
+                case KPLEncodingTypeBlock: {
+                    id value = ((id (*)(id, SEL))(void *) objc_msgSend)((id)self, propertyMeta->_getter);
+                    ((void (*)(id, SEL, id))(void *) objc_msgSend)((id)one, propertyMeta->_setter, value);
+                } break;
+                    
+                case KPLEncodingTypeSEL:
+                case KPLEncodingTypePointer:
+                case KPLEncodingTypeCString: {
+                    size_t value = ((size_t (*)(id, SEL))(void *) objc_msgSend)((id)self, propertyMeta->_getter);
+                    ((void (*)(id, SEL, size_t))(void *) objc_msgSend)((id)one, propertyMeta->_setter, value);
+                } break;
+                
+                case KPLEncodingTypeStruct:
+                case KPLEncodingTypeUnion: {
+                    @try {
+                        NSValue *value = [self valueForKey:NSStringFromSelector(propertyMeta->_getter)];
+                        if (value) {
+                            [one setValue:value forKey:propertyMeta->_name];
+                        }
+                    } @catch (NSException *exception) {}
+                } // break; command for code coverage in next line
+                default: break;
+            }
+        }
+    }
+    return one;
+}
+
+- (void)kpl_modelEncodeWithCoder:(NSCoder *)aCoder {
+    if (!aCoder) return;
+    if (self == (id)kCFNull) {
+        [((id<NSCoding>)self) encodeWithCoder:aCoder];
+        return;
+    }
+    
+    _KPLModelMeta *modelMeta = [_KPLModelMeta metaWithClass:self.class];
+    if (modelMeta->_nsType) {
+        [((id<NSCoding>)self) encodeWithCoder:aCoder];
+        return;
+    }
+    
+    for (_KPLModelPropertyMeta *propertyMeta in modelMeta->_allPropertyMetas) {
+        if (!propertyMeta->_getter) return;
+        
+        if (propertyMeta->_isCNumber) {
+            NSNumber *value = ModelCreateNumberFromProperty(self, propertyMeta);
+            if (value != nil) [aCoder encodeObject:value forKey:propertyMeta->_name];
+        } else {
+            switch (propertyMeta->_nsType & KPLEncodingTypeMask) {
+                case KPLEncodingTypeObject: {
+                    id value = ((id (*)(id, SEL))(void *) objc_msgSend)((id)self, propertyMeta->_getter);
+                    if (value && (propertyMeta->_nsType || [value respondsToSelector:@selector(encodeWithCoder:)])) {
+                        if ([value isKindOfClass:[NSValue class]]) {
+                            if ([value isKindOfClass:[NSNumber class]]) {
+                                [aCoder encodeObject:value forKey:propertyMeta->_name];
+                            }
+                        } else {
+                            [aCoder encodeObject:value forKey:propertyMeta->_name];
+                        }
+                    }
+                } break;
+                    
+                case KPLEncodingTypeSEL: {
+                    SEL value = ((SEL (*)(id, SEL))(void *) objc_msgSend)((id)self, propertyMeta->_getter);
+                    if (value) {
+                        NSString *str = NSStringFromSelector(value);
+                        [aCoder encodeObject:str forKey:propertyMeta->_name];
+                    }
+                } break;
+                    
+                case KPLEncodingTypeStruct:
+                case KPLEncodingTypeUnion: {
+                    if (propertyMeta->_isKVCCompatible && propertyMeta->_isStructAvailableForKeyedArchiver) {
+                        @try {
+                            NSValue *value = [self valueForKey:NSStringFromSelector(propertyMeta->_getter)];
+                            [aCoder encodeObject:value forKey:propertyMeta->_name];
+                        } @catch (NSException *exception) {}
+                    }
+                } break;
+                    
+                default:
+                    break;
+            }
+        }
+        
+    }
+}
+
+- (id)kpl_modelInitWithCoder:(NSCoder *)aDecoder {
+    if (!aDecoder) return self;
+    if (self == (id)kCFNull) return self;
+    _KPLModelMeta *modelMeta = [_KPLModelMeta metaWithClass:self.class];
+    if (modelMeta->_nsType) return self;
+    
+    for (_KPLModelPropertyMeta *propertyMeta in modelMeta->_allPropertyMetas) {
+        if (!propertyMeta->_setter) continue;
+        
+        if (propertyMeta->_isCNumber) {
+            NSNumber *value = [aDecoder decodeObjectForKey:propertyMeta->_name];
+            if ([value isKindOfClass:[NSNumber class]]) {
+                ModelSetNumberToProperty(self, value, propertyMeta);
+                [value class];
+            }
+        } else {
+            KPLEncodingType type = propertyMeta->_type & KPLEncodingTypeMask;
+            switch (type) {
+                case KPLEncodingTypeObject: {
+                    id value = [aDecoder decodeObjectForKey:propertyMeta->_name];
+                    ((void (*)(id, SEL, id))(void *) objc_msgSend)((id)self, propertyMeta->_setter, value);
+                } break;
+                    
+                case KPLEncodingTypeSEL: {
+                    NSString *str = [aDecoder decodeObjectForKey:propertyMeta->_name];
+                    if ([str isKindOfClass:[NSString class]]) {
+                        SEL sel = NSSelectorFromString(str);
+                        ((void (*)(id, SEL, SEL))(void *) objc_msgSend)((id)self, propertyMeta->_setter, sel);
+                    }
+                } break;
+                
+                case KPLEncodingTypeStruct:
+                case KPLEncodingTypeUnion: {
+                    if (propertyMeta->_isKVCCompatible) {
+                        @try {
+                            NSValue *value = [aDecoder decodeObjectForKey:propertyMeta->_name];
+                            if (value) [self setValue:value forKey:propertyMeta->_name];
+                        } @catch (NSException *exception) {}
+                    }
+                } break;
+                    
+                default:
+                    break;
+            }
+        
+        }
+    }
+    return self;
+}
+
+- (NSUInteger)kpl_modelHash {
+    if (self == (id)kCFNull) return [self hash];
+    _KPLModelMeta *modelMeta = [_KPLModelMeta metaWithClass:self.class];
+    if (modelMeta->_nsType) return [self hash];
+    
+    NSUInteger value = 0;
+    NSUInteger count = 0;
+    for (_KPLModelPropertyMeta *propertyMeta in modelMeta->_allPropertyMetas) {
+        if (!propertyMeta->_isKVCCompatible) continue;
+        value ^= [[self valueForKey:NSStringFromSelector(propertyMeta->_getter)] hash];
+        count++;
+    }
+    if (count == 0) value = (long)((__bridge  void *)(self));
+    return value;
+}
+
+@end
+
+@implementation NSArray (KPLModel)
+
++ (NSArray *)kpl_modelArrayWithClass:(Class)cls json:(id)json {
+    if (!json) return nil;
+    NSArray *arr = nil;
+    NSData *jsonData = nil;
+    if ([json isKindOfClass:[NSArray class]]) {
+        arr = json;
+    } else if ([json isKindOfClass:[NSString class]]) {
+        jsonData = [(NSString *)json dataUsingEncoding:NSUTF8StringEncoding];
+    } else if ([json isKindOfClass:[NSData class]]) {
+        jsonData = json;
+    }
+    if (jsonData) {
+        arr = [NSJSONSerialization JSONObjectWithData:jsonData options:kNilOptions error:NULL];
+        if (![arr isKindOfClass:[NSArray class]]) arr = nil;
+    }
+    return [self kpl_modelArrayWithClass:cls array:arr];
+}
+
++ (NSArray *)kpl_modelArrayWithClass:(Class)cls array:(NSArray *)arr {
+    if (!cls || !arr) return nil;
+    NSMutableArray *result = [NSMutableArray array];
+    for (NSDictionary *dic in arr) {
+        if (![dic isKindOfClass:[NSDictionary class]]) continue;
+        NSObject *obj = [cls kpl_modelWithDictionary:dic];
+        if (obj) [result addObject:obj];
+    }
+    return result;
+}
+@end
+
+@implementation NSDictionary (KPLModel)
+
++ (NSDictionary *)kpl_modelDictionaryWithClass:(Class)cls json:(id)json {
+    if (!json) return nil;
+    NSDictionary *dic = nil;
+    NSData *jsonData = nil;
+    if ([json isKindOfClass:[NSDictionary class]]) {
+        dic = json;
+    } else if ([json isKindOfClass:[NSString class]]) {
+        jsonData = [(NSString *)json dataUsingEncoding:NSUTF8StringEncoding];
+    } else if ([json isKindOfClass:[NSData class]]) {
+        jsonData = json;
+    }
+    if (jsonData) {
+        dic = [NSJSONSerialization JSONObjectWithData:jsonData options:kNilOptions error:NULL];
+        if (![dic isKindOfClass:[NSDictionary class]]) dic = nil;
+    }
+    return [self kpl_modelDictionaryWithClass:cls dictionary:dic];
+} 
+
++ (NSDictionary *)kpl_modelDictionaryWithClass:(Class)cls dictionary:(NSDictionary *)dic {
+    if (!cls || !dic) return nil;
+    NSMutableDictionary *result = [NSMutableDictionary new];
+    for (NSString *key in dic.allKeys) {
+        if (![key isKindOfClass:[NSString class]]) continue;
+        NSObject *obj = [cls kpl_modelWithDictionary:dic[key]];
+        if (obj) result[key] = obj;
+    }
+    return result;
 }
 
 @end
